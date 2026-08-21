@@ -1,0 +1,7 @@
+# The modules use only the Python standard library at runtime — urllib, json,
+# csv, statistics, math, hashlib. That is deliberate: this should be droppable
+# onto any machine with a Python 3.11+ interpreter and an API key, without a
+# dependency resolution step standing between you and a result.
+#
+# Testing needs pytest and nothing else.
+pytest>=8.0

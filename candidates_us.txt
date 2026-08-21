@@ -1,0 +1,157 @@
+# Candidate universe for shortlist.py --keywords-file
+#
+# WHAT THIS IS: ~110 product keywords to RANK. It is an input, not a result,
+# and not a recommendation. Nothing here has been validated against demand
+# data — validating it is what the pipeline is for.
+#
+# WHY IT IS LONG: the score is min-max normalised across whatever you supply,
+# so it is comparative. Ranking 16 candidates tells you which of 16 is best,
+# which may still be bad. A universe of ~100 makes "top 10" mean something.
+#
+# COST BEFORE YOU RUN IT: the trend call is one request per keyword per
+# profile. With --profile both that is ~220 requests. The competition call is
+# billed per LISTING returned and only fires for keywords that clear the trend
+# gate, which is the reason the gate order is what it is. Start with a slice:
+#
+#     head -30 candidates.txt > slice.txt
+#     python3 amazon_selector/shortlist.py --keywords-file slice.txt
+#
+# PROVENANCE: these are plausible categories drawn from general knowledge of
+# what sells on Amazon, chosen to span consumer-only, B2B-only and dual-channel
+# products so both profiles have something to work with. Six of them (marked
+# [touted]) are categories that seller-research blogs publicised as 2026 growth
+# stories -- they are here to be TESTED, not trusted: a widely-published
+# "rising category" is by definition one every competitor has already read
+# about, and the seasonality and moat gates exist to kill the ones that only
+# look like opportunities.
+#
+# Replace this file with your own candidates. The pipeline is the value.
+
+# --- publicly touted 2026 risers [touted] ---
+mouth tape
+flat back earrings
+sleep bonnet
+blue light therapy lamp
+sleep earbuds
+hair repair mask
+
+# --- supplements & ingestibles ---
+moringa oil
+shilajit resin
+sea moss gel
+collagen peptides
+magnesium glycinate
+ashwagandha capsules
+creatine monohydrate
+electrolyte powder
+mushroom coffee
+berberine supplement
+elderberry syrup
+turmeric curcumin
+omega 3 fish oil
+apple cider vinegar gummies
+vitamin d3 k2
+psyllium husk powder
+beef liver capsules
+colostrum powder
+probiotic capsules
+protein powder unflavored
+
+# --- skin, hair & personal care ---
+turmeric soap
+tallow balm
+castor oil pack
+rosemary oil for hair
+gua sha tool
+dermaplaning razor
+red light therapy mask
+tongue scraper
+beard oil
+sunscreen stick
+lip sleeping mask
+snail mucin serum
+azelaic acid serum
+scalp massager
+silk pillowcase
+heatless curling rod
+body scrub brush
+foot peel mask
+
+# --- home & kitchen ---
+glass meal prep containers
+silicone baking mat
+beeswax food wrap
+reusable paper towels
+water filter pitcher
+countertop ice maker
+air fryer liners
+cast iron seasoning
+knife sharpener
+spice organizer rack
+vacuum sealer bags
+compost bin countertop
+shower head filter
+humidifier for bedroom
+air purifier replacement filter
+robot vacuum bags
+mattress protector
+blackout curtains
+
+# --- fitness & recovery ---
+resistance bands set
+weighted vest
+jump rope speed
+foam roller
+massage gun
+ankle weights
+yoga mat thick
+grip strengthener
+sauna blanket
+cold plunge tub
+
+# --- pet ---
+dog dental chews
+slow feeder dog bowl
+cat litter mat
+pet hair remover roller
+dog cooling mat
+cat water fountain
+
+# --- baby & kids ---
+silicone bib
+toddler utensils
+baby food pouches reusable
+crib mattress protector
+white noise machine baby
+
+# --- office, shipping & janitorial (B2B leaning) ---
+thermal label printer
+4x6 thermal labels
+poly mailers
+bubble mailers
+packing tape rolls
+stretch wrap pallet
+nitrile gloves
+disposable food service gloves
+hand sanitizer refill
+paper towels case
+trash can liners
+floor cleaner concentrate
+microfiber cleaning cloths
+first aid kit refill
+safety glasses
+hi vis safety vest
+work gloves leather
+disposable aprons
+commercial coffee filters
+break room supplies
+copy paper case
+desk organizer
+monitor light bar
+usb c docking station
+cable management sleeve
+laptop stand adjustable
+label maker tape
+shipping scale
+box cutter safety
+warehouse floor tape

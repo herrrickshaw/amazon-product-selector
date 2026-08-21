@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Raw API responses cached by the fetchers. Re-fetchable, large, and expiring
+# (24h for competition snapshots, 168h for trend series) — see the README.
+data/amazon_raw/
+data/nexscope_raw/
+
+# Generated reports.
+reports/
+
+# Never commit these.
+.env
+*.env

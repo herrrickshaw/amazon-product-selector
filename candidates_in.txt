@@ -1,0 +1,172 @@
+# Candidate universe for Amazon India (amazon.in) — the default marketplace.
+#
+#     python3 amazon_selector/shortlist.py \
+#         --keywords-file amazon_selector/candidates_in.txt
+#
+# WHAT THIS IS: keywords to RANK. An input, not a result, and not a
+# recommendation. Nothing here has been validated against demand data —
+# validating it is what the pipeline is for.
+#
+# WHY IT IS NOT THE US LIST: the catalogues genuinely differ. Ayurvedic and
+# hair-oil categories are mainstream here and niche there; tallow balm and
+# snail mucin are the reverse. Price bands, pack sizes and the B2B buyer all
+# differ too, which is why the gates are denominated in INR (see MARKETS in
+# shortlist.py) rather than converted at run time. candidates_us.txt is kept
+# for the US marketplace.
+#
+# B2B NOTE: Amazon Business India sells largely to GST-registered buyers —
+# offices, clinics, schools, small manufacturers, kirana and retail resellers.
+# The office/industrial block below exists so the B2B profile has stock to
+# work with; consumer-only categories will mostly fail the B2B order-value
+# floor, and that is the gate doing its job rather than a bug.
+#
+# COST: the trend call is one request per keyword per profile. This file with
+# --profile both is ~230 requests before any competition call fires. Start
+# with a slice:
+#
+#     head -40 candidates_in.txt > slice.txt
+#
+# PROVENANCE: general knowledge of the Indian e-commerce catalogue, chosen to
+# span consumer-only, B2B-only and dual-channel products. Not derived from
+# demand data. Seed it from Amazon Product Opportunity Explorer instead if you
+# have a Professional seller account — that is real Amazon data and it answers
+# "what is rising" directly rather than by inference.
+
+# --- ayurvedic & wellness ---
+moringa oil
+shilajit resin
+ashwagandha tablets
+triphala churna
+giloy juice
+chyawanprash
+brahmi oil
+neem tablets
+amla juice
+wheatgrass powder
+tulsi drops
+sea buckthorn juice
+
+# --- hair & skin ---
+onion hair oil
+rosemary oil for hair
+bhringraj oil
+kumkumadi tailam
+multani mitti
+ubtan face pack
+aloe vera gel
+turmeric soap
+kojic acid soap
+beard growth oil
+hair serum for frizz
+scalp massager
+gua sha stone
+vitamin c serum
+sunscreen spf 50 gel
+heatless curler
+
+# --- supplements & nutrition ---
+whey protein isolate
+plant protein powder
+creatine monohydrate
+magnesium glycinate
+vitamin d3 k2
+omega 3 capsules
+biotin tablets
+apple cider vinegar
+psyllium husk isabgol
+electrolyte powder
+collagen powder
+probiotic capsules
+
+# --- kitchen & home ---
+copper water bottle
+stainless steel lunch box
+idli maker steamer
+appam pan
+cast iron dosa tawa
+pressure cooker 5 litre
+masala dabba
+atta storage container
+vacuum insulated flask
+silicone spatula set
+kitchen weighing scale
+ro water purifier filter
+gas stove cleaner
+mosquito repellent liquid
+air purifier filter
+cockroach gel
+
+# --- home & living ---
+bedsheet cotton king size
+mattress protector waterproof
+blackout curtains
+door mat coir
+storage bags under bed
+clothes drying rack
+laundry detergent liquid
+dishwashing liquid refill
+floor cleaner concentrate
+microfiber cloth pack
+
+# --- fitness ---
+resistance bands set
+yoga mat 6mm
+dumbbell set adjustable
+skipping rope
+foam roller
+ankle weights
+massage gun
+
+# --- baby & kids ---
+baby diaper pants
+baby wipes water based
+silicone bib
+baby food maker
+kids water bottle steel
+school bag ergonomic
+
+# --- pet ---
+dog dry food
+cat litter clumping
+pet grooming brush
+dog collar harness
+
+# --- electronics accessories ---
+usb c fast charger
+power bank 20000mah
+laptop stand aluminium
+wireless mouse silent
+mechanical keyboard
+monitor light bar
+hdmi cable 4k
+cable organizer clips
+
+# --- office, packaging & industrial (B2B leaning) ---
+a4 copier paper ream
+thermal paper roll
+barcode label roll
+courier bags tamper proof
+bubble wrap roll
+stretch film roll
+packing tape brown
+corrugated box 5 ply
+nitrile examination gloves
+surgical face mask
+hand sanitizer 5 litre
+liquid soap refill 5 litre
+housekeeping mop set
+garbage bags biodegradable
+safety shoes steel toe
+industrial hand gloves
+reflective safety jacket
+first aid box industrial
+fire extinguisher abc
+tarpaulin sheet waterproof
+cable ties nylon
+electrical insulation tape
+led panel light 2x2
+office chair ergonomic
+whiteboard magnetic
+dot matrix printer ribbon
+gst invoice book
+visitor register book
