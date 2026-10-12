@@ -1,5 +1,9 @@
 # amazon-product-selector
 
+<!-- how-to-use-with-ai -->
+> **New here?** See [How to use this repo with AI (Claude, Gemini, ChatGPT)](HOW_TO_USE_WITH_AI.md) — clone it, paste it into an AI tool, and ask in plain English.
+
+
 Shortlist Amazon products worth selling: rank keywords by **rising** demand,
 then gate on whether the category can actually be entered — separately for
 consumer retail and for bulk B2B. Defaults to **Amazon India**.
