@@ -61,7 +61,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # --- Endpoint resolution ----------------------------------------------------
@@ -237,7 +237,7 @@ def _parse_date(raw) -> date | None:
     if isinstance(raw, (int, float)):  # epoch seconds or ms
         secs = raw / 1000 if raw > 10_000_000_000 else raw
         try:
-            return datetime.utcfromtimestamp(secs).date()
+            return datetime.fromtimestamp(secs, tz=timezone.utc).date()   # utcfromtimestamp() is deprecated (3.12+)
         except (OverflowError, OSError, ValueError):
             return None
     text = str(raw).strip()
