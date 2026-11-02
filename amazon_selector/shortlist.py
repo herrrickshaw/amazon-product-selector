@@ -287,26 +287,16 @@ def build_candidate(keyword: str, trend_summary: dict,
     return row
 
 
-def collect(keyword: str, args, trend_key, comp_key, profile: dict) -> dict:
-    """Trend first, competition second — and only if the trend passed.
+def load_trend_payload(trend_term: str, args, trend_key) -> dict:
+    """Raw trend response for `trend_term`: dry-run fixture, cache, or live fetch.
 
-    Ordering is deliberate: the competition call costs credits per listing
-    returned, and roughly half of any candidate list dies on the trend gate.
-    Paying for competition data on a keyword already disqualified for being
-    seasonal is the most expensive way to learn nothing.
-
-    The trend is read on the PROFILE'S term, not the bare keyword — "bulk
-    moringa oil" is a different search series from "moringa oil", with its own
-    volume and its own seasonality, which is the reason the two profiles are
-    separate analyses rather than one with a filter.
+    I/O edge of collect(): cache policy and the network call live here so the
+    gating logic in collect() reads as pure sequencing.
     """
-    gates = resolve_gates(profile, market_for(args.country))
-    trend_term = expand(profile["trend_term"], keyword)
-
     tcp = trend.cache_path(trend_term, args.country)
     tfresh = trend.cache_is_fresh(tcp, args.trend_cache_max_age_hours)
     if args.dry_run:
-        payload = trend.dry_run_payload(trend_term)
+        return trend.dry_run_payload(trend_term)
     elif args.from_cache or tfresh:
         # Previously this path never cached trend responses at all, so
         # --from-cache silently did nothing for the trend half and every run
@@ -331,6 +321,26 @@ def collect(keyword: str, args, trend_key, comp_key, profile: dict) -> dict:
         if not args.no_cache:
             tcp.parent.mkdir(parents=True, exist_ok=True)
             tcp.write_text(json.dumps(payload))
+    return payload
+
+
+def collect(keyword: str, args, trend_key, comp_key, profile: dict) -> dict:
+    """Trend first, competition second — and only if the trend passed.
+
+    Ordering is deliberate: the competition call costs credits per listing
+    returned, and roughly half of any candidate list dies on the trend gate.
+    Paying for competition data on a keyword already disqualified for being
+    seasonal is the most expensive way to learn nothing.
+
+    The trend is read on the PROFILE'S term, not the bare keyword — "bulk
+    moringa oil" is a different search series from "moringa oil", with its own
+    volume and its own seasonality, which is the reason the two profiles are
+    separate analyses rather than one with a filter.
+    """
+    gates = resolve_gates(profile, market_for(args.country))
+    trend_term = expand(profile["trend_term"], keyword)
+
+    payload = load_trend_payload(trend_term, args, trend_key)
     points = trend.parse_series(payload, trend_term)
     tsum = trend.summarise_keyword(keyword, points, args.window)
     tsum["opportunity_flag"] = trend.opportunity_flag(tsum)
@@ -457,6 +467,43 @@ def write_markdown(path: Path, shortlist: list[dict], rejected: list[dict],
     path.write_text("\n".join(md) + "\n", encoding="utf-8")
 
 
+def split_by_gates(candidates: list[dict], args, gates: dict) -> tuple[list[dict], list[dict]]:
+    """Partition candidates into (passed, rejected); rejects get `gate_failures`.
+
+    A candidate already rejected at the trend pre-gate keeps that reason
+    rather than being re-gated on data it never fetched.
+    """
+    passed, rejected = [], []
+    for c in candidates:
+        fails = c.get("gate_failures")
+        fails = fails.split("; ") if fails else gate(
+            c, allowed_flags=tuple(args.allowed_flags),
+            min_volume=gates["min_volume"],
+            min_observations=gates["min_observations"],
+            max_review_moat=gates["max_review_moat"],
+            min_median_price=gates["min_median_price"])
+        if fails:
+            c["gate_failures"] = "; ".join(fails)
+            rejected.append(c)
+        else:
+            passed.append(c)
+    return passed, rejected
+
+
+def print_profile_report(shortlist: list[dict], rejected: list[dict], n_candidates: int) -> None:
+    """Console summary of one profile run (shortlist with score parts, then rejects)."""
+    print(f"  --- shortlist ({len(shortlist)} of {n_candidates}) ---")
+    for r in shortlist:
+        print(f"    {r['rank']}. {r['keyword']:<18s} score {r['score']:.3f}  "
+              f"(growth {r['score_growth']:.2f} demand {r['score_demand']:.2f} "
+              f"openness {r['score_openness']:.2f} headroom {r['score_headroom']:.2f})")
+    if not shortlist:
+        print("    nothing passed the gates")
+    print(f"  --- rejected ({len(rejected)}) ---")
+    for r in rejected:
+        print(f"    {r['keyword']:<18s} {r['gate_failures']}")
+
+
 def run_profile(name: str, keywords: list[str], args, trend_key, comp_key,
                 out: Path) -> tuple[list[dict], list[dict]]:
     profile = PROFILES[name]
@@ -476,38 +523,25 @@ def run_profile(name: str, keywords: list[str], args, trend_key, comp_key,
         except RuntimeError as e:
             print(f"    {e}")
 
-    passed, rejected = [], []
-    for c in candidates:
-        fails = c.get("gate_failures")
-        fails = fails.split("; ") if fails else gate(
-            c, allowed_flags=tuple(args.allowed_flags),
-            min_volume=gates["min_volume"],
-            min_observations=gates["min_observations"],
-            max_review_moat=gates["max_review_moat"],
-            min_median_price=gates["min_median_price"])
-        if fails:
-            c["gate_failures"] = "; ".join(fails)
-            rejected.append(c)
-        else:
-            passed.append(c)
+    passed, rejected = split_by_gates(candidates, args, gates)
 
     shortlist = score_candidates(passed, profile["weights"])
 
-    print(f"  --- shortlist ({len(shortlist)} of {len(candidates)}) ---")
-    for r in shortlist:
-        print(f"    {r['rank']}. {r['keyword']:<18s} score {r['score']:.3f}  "
-              f"(growth {r['score_growth']:.2f} demand {r['score_demand']:.2f} "
-              f"openness {r['score_openness']:.2f} headroom {r['score_headroom']:.2f})")
-    if not shortlist:
-        print("    nothing passed the gates")
-    print(f"  --- rejected ({len(rejected)}) ---")
-    for r in rejected:
-        print(f"    {r['keyword']:<18s} {r['gate_failures']}")
+    print_profile_report(shortlist, rejected, len(candidates))
 
     write_csv(out / f"amazon_shortlist_{name}.csv", shortlist + rejected)
     write_markdown(out / f"amazon_shortlist_{name}.md", shortlist, rejected,
                    args.country.upper(), args, profile, gates)
     return shortlist, rejected
+
+
+def read_keywords(keywords: str, keywords_file: str | None) -> list[str]:
+    """Keywords from a file (one per line, '#' comments) or a comma-separated string."""
+    if keywords_file:
+        text = Path(keywords_file).read_text(encoding="utf-8")
+        return [ln.strip() for ln in text.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")]
+    return [k.strip() for k in keywords.split(",") if k.strip()]
 
 
 def main() -> int:
@@ -550,12 +584,7 @@ def main() -> int:
     args = ap.parse_args()
     args.profile_name = None
 
-    if args.keywords_file:
-        text = Path(args.keywords_file).read_text(encoding="utf-8")
-        keywords = [ln.strip() for ln in text.splitlines()
-                    if ln.strip() and not ln.strip().startswith("#")]
-    else:
-        keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
+    keywords = read_keywords(args.keywords, args.keywords_file)
     if not keywords:
         sys.exit("No keywords given.")
 
