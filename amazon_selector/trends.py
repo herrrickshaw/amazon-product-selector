@@ -56,13 +56,14 @@ import os
 import re
 import statistics
 import sys
-import time as _time
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+from _http import cache_age_hours, cache_is_fresh, get_json, slugify
 
 # --- Endpoint resolution ----------------------------------------------------
 # The base is known (NEXSCOPE_PROXY_BASE); the PATH below is still an
@@ -97,23 +98,6 @@ CACHE_DIR = Path("data/nexscope_raw")
 # quota. Deliberately much longer than the competition module's 24h: that one
 # reads prices and rankings, which move daily.
 DEFAULT_CACHE_MAX_AGE_HOURS = 168.0
-
-
-def cache_is_fresh(path: Path, max_age_hours: float) -> bool:
-    """A cache with no expiry is worse than no cache: it answers today's
-    question with last month's data and nothing downstream can tell.
-    max_age_hours <= 0 disables expiry (keep forever)."""
-    if not path.exists():
-        return False
-    if max_age_hours <= 0:
-        return True
-    return (_time.time() - path.stat().st_mtime) / 3600.0 <= max_age_hours
-
-
-def cache_age_hours(path: Path) -> float | None:
-    if not path.exists():
-        return None
-    return (_time.time() - path.stat().st_mtime) / 3600.0
 
 
 class SchemaMismatch(RuntimeError):
@@ -152,8 +136,7 @@ def build_url(endpoint: str, keyword: str, country: str,
 
 
 def cache_path(keyword: str, country: str) -> Path:
-    slug = re.sub(r"[^a-z0-9]+", "_", keyword.lower()).strip("_")
-    return CACHE_DIR / f"{slug}__{country.lower()}.json"
+    return CACHE_DIR / f"{slugify(keyword)}__{country.lower()}.json"
 
 
 def fetch(keyword: str, country: str, key: str, endpoint: str,
@@ -161,42 +144,29 @@ def fetch(keyword: str, country: str, key: str, endpoint: str,
           start: str | None = None, end: str | None = None,
           timeout: int = 30, retries: int = 3) -> dict:
     url = build_url(endpoint, keyword, country, start, end)
-    last = ""
-    for attempt in range(retries):
-        req = urllib.request.Request(url, headers={auth_header: f"{auth_prefix}{key}"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310
-                return json.loads(r.read().decode())
-        except urllib.error.HTTPError as e:
-            last = f"HTTP {e.code}"
-            if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
-                wait = 2 ** (attempt + 1)
-                print(f"    {last} — retrying in {wait}s")
-                time.sleep(wait)
-                continue
-            if e.code in (401, 403):
-                raise RuntimeError(
-                    f"{last} for {redact(url)}. Auth rejected — check "
+
+    def http_error(code: int, label: str) -> str:
+        if code in (401, 403):
+            return (f"{label} for {redact(url)}. Auth rejected — check "
                     f"NEXSCOPE_API_KEY, and check the auth scheme: this module "
                     f"assumes '{auth_header}: {auth_prefix.strip()} <key>'. If "
                     f"the API wants a bare key or a different header, pass "
-                    f"--auth-header / --auth-prefix."
-                ) from None
-            if e.code == 404:
-                raise RuntimeError(
-                    f"{last} for {redact(url)}. The endpoint path is an "
+                    f"--auth-header / --auth-prefix.")
+        if code == 404:
+            return (f"{label} for {redact(url)}. The endpoint path is an "
                     f"assumption in this module — pass the real one with "
-                    f"--endpoint (or set NEXSCOPE_ENDPOINT)."
-                ) from None
-            raise RuntimeError(f"{last} for {redact(url)}") from None
-        except urllib.error.URLError as e:
-            raise RuntimeError(
-                f"cannot reach {urllib.parse.urlparse(endpoint).netloc} "
-                f"({e.reason}). If this is the Claude Code sandbox, that host "
+                    f"--endpoint (or set NEXSCOPE_ENDPOINT).")
+        return f"{label} for {redact(url)}"
+
+    def url_error(reason: object) -> str:
+        return (f"cannot reach {urllib.parse.urlparse(endpoint).netloc} "
+                f"({reason}). If this is the Claude Code sandbox, that host "
                 f"is refused by the egress proxy with a 403 — run this where "
-                f"you have ordinary internet access."
-            ) from None
-    raise RuntimeError(f"gave up after {retries} attempts ({last})")
+                f"you have ordinary internet access.")
+
+    return get_json(url, {auth_header: f"{auth_prefix}{key}"},
+                    timeout=timeout, retries=retries,
+                    http_error=http_error, url_error=url_error)
 
 
 # ---------------------------------------------------------------- parsing

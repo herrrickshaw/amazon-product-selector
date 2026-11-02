@@ -68,12 +68,13 @@ import os
 import re
 import statistics
 import sys
-import time as _time
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+from _http import cache_age_hours, cache_is_fresh, get_json, slugify
 
 BASE = "https://api.openwebninja.com/realtime-amazon-data/search"
 
@@ -135,27 +136,8 @@ def build_url(query: str, country: str = "US", page: int = 1,
 DEFAULT_CACHE_MAX_AGE_HOURS = 24
 
 
-def cache_is_fresh(path: Path, max_age_hours: float) -> bool:
-    """A cache with no expiry is worse than no cache: it silently answers
-    today's question with last month's data, and nothing downstream can tell.
-    max_age_hours <= 0 disables the check (keep forever)."""
-    if not path.exists():
-        return False
-    if max_age_hours <= 0:
-        return True
-    age_hours = (_time.time() - path.stat().st_mtime) / 3600.0
-    return age_hours <= max_age_hours
-
-
-def cache_age_hours(path: Path) -> float | None:
-    if not path.exists():
-        return None
-    return (_time.time() - path.stat().st_mtime) / 3600.0
-
-
 def cache_path(query: str, country: str, page: int) -> Path:
-    slug = re.sub(r"[^a-z0-9]+", "_", query.lower()).strip("_")
-    return CACHE_DIR / f"{slug}__{country.lower()}__p{page}.json"
+    return CACHE_DIR / f"{slugify(query)}__{country.lower()}__p{page}.json"
 
 
 def fetch(query: str, country: str, page: int, key: str,
@@ -167,34 +149,22 @@ def fetch(query: str, country: str, page: int, key: str,
     into the query should not silently start leaking.
     """
     url = build_url(query, country, page)
-    last = ""
-    for attempt in range(retries):
-        req = urllib.request.Request(url, headers={"x-api-key": key})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310
-                return json.loads(r.read().decode())
-        except urllib.error.HTTPError as e:
-            last = f"HTTP {e.code}"
-            if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
-                wait = 2 ** (attempt + 1)
-                print(f"    {last} — retrying in {wait}s")
-                time.sleep(wait)
-                continue
-            if e.code in (401, 403):
-                raise RuntimeError(
-                    f"{last} from the API for {redact(url)}. That is an auth "
+
+    def http_error(code: int, label: str) -> str:
+        if code in (401, 403):
+            return (f"{label} from the API for {redact(url)}. That is an auth "
                     f"or plan rejection, not a network problem — check "
-                    f"OPENWEB_NINJA_API_KEY and your quota."
-                ) from None
-            raise RuntimeError(f"{last} for {redact(url)}") from None
-        except urllib.error.URLError as e:
-            raise RuntimeError(
-                f"cannot reach api.openwebninja.com ({e.reason}). If this is "
+                    f"OPENWEB_NINJA_API_KEY and your quota.")
+        return f"{label} for {redact(url)}"
+
+    def url_error(reason: object) -> str:
+        return (f"cannot reach api.openwebninja.com ({reason}). If this is "
                 f"the Claude Code sandbox, that host is refused by the egress "
                 f"proxy with a 403 — run this where you have ordinary "
-                f"internet access. See the module docstring."
-            ) from None
-    raise RuntimeError(f"gave up after {retries} attempts ({last})")
+                f"internet access. See the module docstring.")
+
+    return get_json(url, {"x-api-key": key}, timeout=timeout, retries=retries,
+                    http_error=http_error, url_error=url_error)
 
 
 def products_of(payload: dict) -> list[dict]:
