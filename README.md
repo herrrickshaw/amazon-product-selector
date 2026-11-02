@@ -1,14 +1,25 @@
-# amazon-product-selector
+# Amazon product selector
 
-<!-- how-to-use-with-ai -->
-> **New here?** See [How to use this repo with AI (Claude, Gemini, ChatGPT)](HOW_TO_USE_WITH_AI.md) — clone it, paste it into an AI tool, and ask in plain English.
+Shortlist Amazon products worth selling: rank keywords by **rising** demand, then gate on whether the
+category can actually be entered — separately for consumer retail (B2C) and bulk B2B. Defaults to
+**Amazon India**. For anyone choosing what to sell; outputs per-profile CSV and Markdown reports under `reports/`.
 
+> Status: research-only. Needs two paid APIs for live runs; `--dry-run` works offline. The Nexscope
+> response schema is assumed, not verified (see Limitations). Not business or investment advice.
 
-Shortlist Amazon products worth selling: rank keywords by **rising** demand,
-then gate on whether the category can actually be entered — separately for
-consumer retail and for bulk B2B. Defaults to **Amazon India**.
+New here? See [How to use this repo with AI](HOW_TO_USE_WITH_AI.md).
 
+## What it does
+- Ranks candidate keywords by log-slope search-volume growth, with seasonality and noise checks.
+- Gates on trend verdict, search volume, review moat and (B2B) median price, and records why each rejection failed.
+- Runs B2C and B2B as separate analyses with their own search terms, gates and weights.
+- Resolves currency- and volume-denominated thresholds per marketplace (`MARKETS`, default `IN`).
+- Caches raw API responses with expiry; `--from-cache` re-runs offline.
+
+## Quick start
 ```bash
+git clone https://github.com/herrrickshaw/amazon-product-selector && cd amazon-product-selector
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python amazon_selector/shortlist.py --dry-run          # no API key, no network
 
@@ -16,6 +27,8 @@ export NEXSCOPE_API_KEY=...  NEXSCOPE_PROXY_BASE=https://api.nexscope.ai/
 export OPENWEB_NINJA_API_KEY=...
 python amazon_selector/shortlist.py --keywords-file candidates_in.txt
 ```
+
+Sample `--dry-run` output:
 
 ```
 === B2C — consumer retail · IN (INR) ===
@@ -40,7 +53,18 @@ python amazon_selector/shortlist.py --keywords-file candidates_in.txt
   B2B only:            chyawanprash
 ```
 
-## The idea
+## How it works
+| Stage | Module | Output |
+|---|---|---|
+| Trend fetch + parse + verdict | `amazon_selector/trends.py` | growth, momentum, YoY, R², `opportunity_flag` |
+| Competition fetch + metrics | `amazon_selector/competition.py` | review moat, price dispersion, demand per listing, unit-share |
+| Shared retry GET and cache ageing | `amazon_selector/_http.py` | used by both fetchers |
+| Gates, scoring, reports, CLI | `amazon_selector/shortlist.py` | `reports/amazon_shortlist_{b2c,b2b}.csv` / `.md` |
+
+Trend runs before competition on purpose: the competition call bills per listing returned and roughly
+half of any candidate list dies on the trend gate. All three modules use only the standard library at runtime.
+
+### The idea
 
 Picking a product to sell needs two answers, and most tools give only one.
 
@@ -52,7 +76,7 @@ steady climb is the better slot.
 **Can you get in?** Growth in a category where three ASINs hold every unit and
 the leaders carry 40,000 reviews each is somebody else's growth.
 
-## Gate first, then rank
+### Gate first, then rank
 
 The pipeline does **not** blend everything into one number and sort. It applies
 pass/fail gates, records *why* each rejection failed, and ranks only survivors.
@@ -67,7 +91,7 @@ and "open, but nobody searches for it" are different next actions.
 Trend runs before competition on purpose — the competition call bills per listing
 returned, and roughly half of any candidate list dies on the trend gate.
 
-## Marketplace: India by default
+### Marketplace: India by default
 
 `--country` defaults to **IN**. Thresholds denominated in money or in absolute
 search counts cannot be one global number, so they live in a `MARKETS` table and
@@ -86,7 +110,7 @@ They sit in one table so retuning after a first real run is a one-line edit.
 kept for the US. The catalogues genuinely differ rather than translating —
 ayurvedic and hair-oil categories are mainstream in one and niche in the other.
 
-## B2C and B2B are separate analyses
+### B2C and B2B are separate analyses
 
 Not one run with a filter, because they do not share a search series. A consumer
 searches `moringa oil`; a purchasing manager searches `bulk moringa oil` or
@@ -105,7 +129,7 @@ read cannot describe both. `--profile b2c | b2b | both` (default `both`).
 **A term on only one side is the signal.** The same product can be saturated at
 retail and open in bulk, or the reverse.
 
-## Caching
+### Caching
 
 Raw responses cache under `data/` and **expire**: competition snapshots after
 24h, trend series after 168h. Not arbitrary — prices and rankings move daily,
@@ -118,7 +142,7 @@ last month's data and nothing downstream can tell. Under `--from-cache` a stale
 entry is still used — with no network it is all there is — but never quietly:
 the run prints its age and the limit it exceeded.
 
-## The three ways a rising line lies
+### The three ways a rising line lies
 
 | Verdict | What it caught |
 |---|---|
@@ -130,7 +154,7 @@ Seasonality is checked **before** volatility. A strongly seasonal series is
 high-variance by definition, so a volatility-first ordering labels every seasonal
 category "spiky" and the specific diagnosis never fires.
 
-## Metrics
+### Metrics
 
 **Trend** — `growth_per_period_pct` is a least-squares slope on **log** volume,
 so it is a rate: 100→200 and 10,000→20,000 score alike, where a linear fit ranks
@@ -149,6 +173,15 @@ IQR/median, so a ₹900 and a ₹40,000 category compare. `demand_per_listing` a
 > the other ten. `0.9` means "best of what you supplied", never "good in absolute
 > terms". Compare within a run, never across runs.
 
+## Repository layout
+| Path | Purpose |
+|---|---|
+| `amazon_selector/` | `shortlist.py` (CLI), `trends.py`, `competition.py`, `_http.py` |
+| `tests/` | pytest suite; no network, fakes and fixtures only |
+| `candidates_in.txt`, `candidates_us.txt` | candidate keyword scaffolding (119 keywords for India) |
+| `docs/DATA_SOURCES.md` | survey of demand-data sources |
+| `data/amazon_raw/`, `data/nexscope_raw/`, `reports/` | generated, gitignored |
+
 ## Data sources
 
 Two paid APIs, both swappable — see [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md)
@@ -165,20 +198,30 @@ parser guessing wrong would return an empty series, and an empty series is
 indistinguishable from "nobody searches for this" — a silently wrong trend is
 worse than a crash. One live call is enough to correct `trends.py`.
 
-## Credentials
+## Configuration
+Credentials are read from the environment only and never committed:
 
-Environment only, never in source:
+| Variable | Used for |
+|---|---|
+| `NEXSCOPE_API_KEY` | trends (required for live runs) |
+| `OPENWEB_NINJA_API_KEY` | competition (required for live runs) |
+| `NEXSCOPE_PROXY_BASE` / `NEXSCOPE_ENDPOINT` | override base URL / full endpoint (default `https://api.nexscope.ai/`) |
 
+The suite scans the tracked tree for both keys' values and key-shaped literals, so one committed by
+accident fails CI. Key CLI flags: `--country`, `--profile b2c|b2b|both`, `--keywords`, `--keywords-file`,
+`--dry-run`, `--from-cache`, `--no-cache`, `--cache-max-age-hours`, `--trend-cache-max-age-hours`, `--out`.
+
+## Testing
 ```bash
-export NEXSCOPE_API_KEY=...          # trends
-export OPENWEB_NINJA_API_KEY=...     # competition
+python -m pytest -q     # 172 passed, 2 skipped
+ruff check .
 ```
+Weighted toward silent failures: sales-badge formats a narrower regex would read as no-data, None-vs-zero
+for unbadged listings, log-slope refusing `log(0)`, booleans rejected as volumes (`float(True) == 1.0`),
+openness moving the right way, the two profiles never collapsing to the same search terms, and neither
+profile rejecting 100% of candidates. CI runs lint, the suite and the dry-run pipeline end to end.
 
-The suite scans the tracked tree for both keys' values and for their key-shaped
-literals, so one committed by accident fails CI rather than shipping.
-
-## Caveats worth reading before you spend money on a decision
-
+## Limitations and known issues
 - **Keyword demand is not category demand.** A staple term reaches a far wider
   population than a niche one; part of any gap is a gap in what the words mean.
 - **A search page is a ranked sample, not a census.**
@@ -188,22 +231,12 @@ literals, so one committed by accident fails CI rather than shipping.
 - **The candidate files are scaffolding, not advice.** Read their headers. Seed
   from Amazon Product Opportunity Explorer instead if you have a Professional
   seller account — that is real Amazon data answering "what is rising" directly.
+- Price floors and volume scales are estimates, not measurements; nothing is calibrated against observed data.
+- The Nexscope response schema is **assumed** (docs host was unreachable). `--endpoint`, `--auth-header`
+  and `--auth-prefix` override the request side; the parser accepts many field names and raises
+  `SchemaMismatch` naming the keys actually returned rather than returning an empty series. One live call
+  is enough to correct `trends.py`.
+- Requires Python 3.11+.
 
-## Tests
-
-```bash
-python -m pytest -q     # 162 tests
-```
-
-Weighted toward failures that are silent rather than loud: sales-badge formats a
-narrower regex would read as no-data, the None-vs-zero distinction that keeps
-unbadged listings out of the coverage denominator, log-slope refusing to
-substitute for `log(0)`, booleans rejected as volumes (`bool` subclasses `int`,
-so `float(True) == 1.0` would turn a flag into a search volume of 1), openness
-moving the right way — an inverted sign there would rank the most entrenched
-category top and look plausible doing it — that the two profiles never collapse
-to the same search terms, and that neither profile rejects 100% of candidates,
-since a correct gate on unrealistic data is indistinguishable from a broken one.
-
-CI runs lint, the suite, and the dry-run pipeline end to end, so the fixtures
-cannot quietly stop exercising the real code paths.
+## Licence
+No licence file yet — all rights reserved.
