@@ -43,7 +43,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import os
@@ -55,64 +54,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import competition as comp  # noqa: E402
 import trends as trend  # noqa: E402
+from _markets import (DEFAULT_COUNTRY, DEFAULT_MARKET, MARKETS,  # noqa: E402,F401
+                      market_for, resolve_gates)
+from _shortlist_output import write_csv, write_markdown  # noqa: E402,F401
 
 # Trend verdicts allowed through. "spiky" and "seasonal bounce" are excluded
 # because they are the two ways a rising-looking series lies.
 DEFAULT_ALLOWED_FLAGS = ("RISING",)
-
-# ---------------------------------------------------------------- markets
-# Thresholds denominated in money or in absolute search counts cannot be one
-# global number. The B2B order-value floor is the clearest case: 25 is a
-# sensible USD floor and a meaningless INR one — Rs 25 is about $0.30, so on
-# amazon.in a currency-naive floor passes literally everything and the gate
-# silently stops existing.
-#
-# `volume_scale` adjusts the search-volume gates for absolute market size:
-# Amazon India's search counts are far smaller than the US's for the same
-# category, so a US floor would reject viable Indian niches for being Indian.
-#
-# HONEST STATUS: b2b_min_price values are converted at rough spot rates and
-# rounded to a round number a buyer would recognise. volume_scale values are
-# ESTIMATES, not measurements — nothing here is calibrated against observed
-# data, and they should be retuned after a first real run in the target
-# marketplace. They are explicit and in one place precisely so that retuning
-# is a one-line edit rather than an archaeology exercise.
-MARKETS = {
-    "US": {"currency": "USD", "symbol": "$",  "b2b_min_price": 25.0,   "volume_scale": 1.0},
-    "IN": {"currency": "INR", "symbol": "\u20b9", "b2b_min_price": 2000.0, "volume_scale": 0.2},
-    "GB": {"currency": "GBP", "symbol": "\u00a3",  "b2b_min_price": 20.0,   "volume_scale": 0.25},
-    "DE": {"currency": "EUR", "symbol": "\u20ac",  "b2b_min_price": 25.0,   "volume_scale": 0.25},
-    "CA": {"currency": "CAD", "symbol": "$",  "b2b_min_price": 35.0,   "volume_scale": 0.12},
-    "AU": {"currency": "AUD", "symbol": "$",  "b2b_min_price": 40.0,   "volume_scale": 0.08},
-    "JP": {"currency": "JPY", "symbol": "\u00a5",  "b2b_min_price": 4000.0, "volume_scale": 0.3},
-    "AE": {"currency": "AED", "symbol": "AED", "b2b_min_price": 90.0,  "volume_scale": 0.05},
-}
-DEFAULT_MARKET = {"currency": "?", "symbol": "", "b2b_min_price": 25.0, "volume_scale": 1.0}
-
-# The stated target marketplace. A US default would silently apply USD-
-# denominated gates to rupee prices, which is the failure the block above
-# exists to prevent.
-DEFAULT_COUNTRY = "IN"
-
-
-def market_for(country: str) -> dict:
-    return MARKETS.get(country.upper(), DEFAULT_MARKET)
-
-
-def resolve_gates(profile: dict, market: dict) -> dict:
-    """Profile gates expressed in the target marketplace's units.
-
-    Kept separate from the profile definition so the profile stays a statement
-    about the CHANNEL (retail vs procurement) and the market stays a statement
-    about the COUNTRY. Folding them together would need one entry per
-    channel-country pair.
-    """
-    g = dict(profile["gates"])
-    if g["min_median_price"] is not None:
-        g["min_median_price"] = market["b2b_min_price"]
-    g["min_volume"] = max(1.0, round(g["min_volume"] * market["volume_scale"]))
-    return g
-
 
 # ---------------------------------------------------------------- profiles
 # B2C and B2B are run as SEPARATE analyses rather than one with a filter,
@@ -376,95 +324,6 @@ def collect(keyword: str, args, trend_key, comp_key, profile: dict) -> dict:
         row["trend_term"] = trend_term
     row["priced_competition"] = bool(rows)
     return row
-
-
-def write_csv(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cols: list[str] = []
-    for r in rows:
-        for k in r:
-            if k not in cols:
-                cols.append(k)
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=cols, restval="")
-        w.writeheader()
-        w.writerows(rows)
-
-
-def write_markdown(path: Path, shortlist: list[dict], rejected: list[dict],
-                   country: str, args, profile: dict, gates: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    md = [
-        f"# Amazon product shortlist — {profile['label']}",
-        "",
-        f"Marketplace: **{country}** · {len(shortlist)} of "
-        f"{len(shortlist) + len(rejected)} candidates passed the gates.",
-        "",
-        f"Search terms: `{profile['trend_term']}` for the trend, "
-        + ", ".join(f"`{t}`" for t in profile["query_templates"])
-        + " for competition.",
-        "",
-        f"Gates: trend in {list(args.allowed_flags)} · latest volume ≥ "
-        f"{gates['min_volume']:g} · ≥ {gates['min_observations']} observations "
-        f"· review moat ≤ {gates['max_review_moat']:,.0f}"
-        + (f" · median price ≥ {market_for(country)['symbol']}"
-           f"{gates['min_median_price']:,.0f}"
-           if gates["min_median_price"] else ""),
-        "",
-        "## Shortlist",
-        "",
-    ]
-    if shortlist:
-        cols = ["rank", "keyword", "score", "latest_volume", "growth_per_period_pct",
-                "momentum_pct", "yoy_pct", "review_moat", "demand_per_listing",
-                "price_dispersion", "median_price"]
-        md += ["| " + " | ".join(cols) + " |",
-               "| " + " | ".join("---" for _ in cols) + " |"]
-        for r in shortlist:
-            md.append("| " + " | ".join(
-                "" if r.get(c) is None else str(r.get(c)) for c in cols) + " |")
-    else:
-        md.append("_Nothing passed the gates._")
-
-    md += ["", "## Rejected, and why", ""]
-    if rejected:
-        md += ["| keyword | trend | latest volume | reason |",
-               "| --- | --- | --- | --- |"]
-        for r in rejected:
-            md.append(f"| {r['keyword']} | {r.get('opportunity_flag')} | "
-                      f"{r.get('latest_volume')} | {r.get('gate_failures', '')} |")
-    else:
-        md.append("_Nothing was rejected._")
-
-    md += [
-        "",
-        "## How the ranking works",
-        "",
-        "Weights: " + ", ".join(f"`{k}` {v:.0%}"
-                                for k, v in profile["weights"].items()) + ".",
-        "",
-        "- **growth** — trend slope, fitted on log volume so it is a rate.",
-        "- **demand** — latest volume, also logged: 500→5,000 matters more than "
-        "50,000→54,500.",
-        "- **openness** — low review moat and high demand-per-listing, averaged. "
-        "This is the column that separates a big category from an enterable one.",
-        "- **headroom** — price dispersion (IQR/median). Wide spread means room "
-        "to position; tight clustering means competing on price alone.",
-        "",
-        "**The score is relative to this candidate set.** Components are min-max "
-        "normalised across the candidates you supplied, so adding an eleventh "
-        "changes the other ten, and `0.9` means \"best of what you supplied\", "
-        "not \"good in absolute terms\". Compare within a run, never across runs.",
-        "",
-        "**Gates are not score terms.** No amount of growth makes a category with "
-        "entrenched review incumbents enterable, so the moat disqualifies rather "
-        "than subtracts. The rejected table above is usually the more useful half: "
-        "\"rising but seasonal\" and \"open but unsearched\" are different next "
-        "actions.",
-    ]
-    path.write_text("\n".join(md) + "\n", encoding="utf-8")
 
 
 def split_by_gates(candidates: list[dict], args, gates: dict) -> tuple[list[dict], list[dict]]:
