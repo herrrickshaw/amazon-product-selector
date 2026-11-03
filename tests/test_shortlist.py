@@ -635,3 +635,43 @@ def test_the_default_keywords_demonstrate_both_profiles_on_the_default_market():
     assert only_b2c and only_b2b, (
         "the defaults should show a term on each side alone — that divergence "
         "is the reason two profiles exist")
+
+
+# ---- helpers extracted from collect()/run_profile()/main() -----------------
+
+def test_read_keywords_from_string_and_file(tmp_path):
+    from shortlist import read_keywords
+    assert read_keywords("a, b,, c ", None) == ["a", "b", "c"]
+    f = tmp_path / "k.txt"
+    f.write_text("# header\nmoringa oil\n\n  honey  \n", encoding="utf-8")
+    assert read_keywords("ignored", str(f)) == ["moringa oil", "honey"]
+
+
+def test_split_by_gates_keeps_pretrend_reason_and_gates_the_rest():
+    import types
+    from shortlist import PROFILES, market_for, resolve_gates, split_by_gates
+    gates = resolve_gates(PROFILES["b2c"], market_for("IN"))
+    args = types.SimpleNamespace(allowed_flags=["RISING"])
+    pre = {"keyword": "x", "gate_failures": "trend is 'flat', not in ['RISING']"}
+    passed, rejected = split_by_gates([pre], args, gates)
+    assert passed == [] and rejected == [pre]
+    assert rejected[0]["gate_failures"].startswith("trend is 'flat'")
+
+
+def test_load_trend_payload_dry_run_needs_no_key_or_cache():
+    import types
+    from shortlist import load_trend_payload
+    args = types.SimpleNamespace(country="IN", trend_cache_max_age_hours=168.0,
+                                 dry_run=True)
+    assert isinstance(load_trend_payload("moringa oil", args, None), dict)
+
+
+def test_load_trend_payload_from_cache_without_file_raises(tmp_path, monkeypatch):
+    import types
+    import trends as trend
+    from shortlist import load_trend_payload
+    monkeypatch.setattr(trend, "CACHE_DIR", tmp_path)
+    args = types.SimpleNamespace(country="IN", trend_cache_max_age_hours=168.0,
+                                 dry_run=False, from_cache=True)
+    with pytest.raises(RuntimeError, match="no cached trend series"):
+        load_trend_payload("moringa oil", args, None)
