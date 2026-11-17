@@ -53,6 +53,15 @@ def _args(**over):
     return argparse.Namespace(**base)
 
 
+def _stub_competition(monkeypatch, cache_dir=None):
+    """These tests drive the non-dry-run path; without this the competition
+    half made a real request to OpenWeb Ninja with the placeholder key 'k'."""
+    monkeypatch.setattr(comp, "fetch",
+                        lambda query, country, page, key, **kw: comp.dry_run_payload(query, country))
+    if cache_dir is not None:
+        monkeypatch.setattr(comp, "CACHE_DIR", cache_dir)
+
+
 # ------------------------------------------------------------------ weights
 def test_weights_sum_to_one():
     assert sum(WEIGHTS.values()) == pytest.approx(1.0)
@@ -394,6 +403,7 @@ def test_the_history_window_is_actually_requested(monkeypatch):
     candidate — the seasonality gate then never fires and trough-bounce
     categories pass as RISING. A short window must not look like an absent
     season."""
+    _stub_competition(monkeypatch)
     seen = {}
 
     def fake_fetch(keyword, country, key, endpoint, auth_header, auth_prefix,
@@ -410,6 +420,7 @@ def test_the_history_window_is_actually_requested(monkeypatch):
 
 
 def test_a_longer_window_is_passed_through(monkeypatch):
+    _stub_competition(monkeypatch)
     seen = {}
 
     def fake_fetch(keyword, country, key, endpoint, auth_header, auth_prefix,
@@ -488,6 +499,7 @@ def test_the_shortlist_writes_and_then_reuses_a_trend_cache(tmp_path, monkeypatc
     """Regression test. The shortlist path never cached trend responses at all,
     so --from-cache silently did nothing for the trend half and every run
     re-spent one request per keyword per profile."""
+    _stub_competition(monkeypatch, tmp_path / "comp")
     monkeypatch.setattr(trend, "CACHE_DIR", tmp_path)
     calls = []
 
@@ -506,6 +518,7 @@ def test_the_shortlist_writes_and_then_reuses_a_trend_cache(tmp_path, monkeypatc
 
 
 def test_a_stale_trend_cache_is_refetched_rather_than_served(tmp_path, monkeypatch):
+    _stub_competition(monkeypatch, tmp_path / "comp")
     monkeypatch.setattr(trend, "CACHE_DIR", tmp_path)
     calls = []
 
