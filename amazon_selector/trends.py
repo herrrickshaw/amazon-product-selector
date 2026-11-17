@@ -48,21 +48,22 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
-import hashlib
 import json
 import math
 import os
 import re
 import statistics
 import sys
-import time as _time
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+from _http import cache_age_hours, cache_is_fresh, get_json, slugify
+from _trend_fixtures import dry_run_payload  # noqa: F401
+from _trend_output import write_csv, write_markdown  # noqa: F401
 
 # --- Endpoint resolution ----------------------------------------------------
 # The base is known (NEXSCOPE_PROXY_BASE); the PATH below is still an
@@ -97,23 +98,6 @@ CACHE_DIR = Path("data/nexscope_raw")
 # quota. Deliberately much longer than the competition module's 24h: that one
 # reads prices and rankings, which move daily.
 DEFAULT_CACHE_MAX_AGE_HOURS = 168.0
-
-
-def cache_is_fresh(path: Path, max_age_hours: float) -> bool:
-    """A cache with no expiry is worse than no cache: it answers today's
-    question with last month's data and nothing downstream can tell.
-    max_age_hours <= 0 disables expiry (keep forever)."""
-    if not path.exists():
-        return False
-    if max_age_hours <= 0:
-        return True
-    return (_time.time() - path.stat().st_mtime) / 3600.0 <= max_age_hours
-
-
-def cache_age_hours(path: Path) -> float | None:
-    if not path.exists():
-        return None
-    return (_time.time() - path.stat().st_mtime) / 3600.0
 
 
 class SchemaMismatch(RuntimeError):
@@ -152,8 +136,7 @@ def build_url(endpoint: str, keyword: str, country: str,
 
 
 def cache_path(keyword: str, country: str) -> Path:
-    slug = re.sub(r"[^a-z0-9]+", "_", keyword.lower()).strip("_")
-    return CACHE_DIR / f"{slug}__{country.lower()}.json"
+    return CACHE_DIR / f"{slugify(keyword)}__{country.lower()}.json"
 
 
 def fetch(keyword: str, country: str, key: str, endpoint: str,
@@ -161,42 +144,29 @@ def fetch(keyword: str, country: str, key: str, endpoint: str,
           start: str | None = None, end: str | None = None,
           timeout: int = 30, retries: int = 3) -> dict:
     url = build_url(endpoint, keyword, country, start, end)
-    last = ""
-    for attempt in range(retries):
-        req = urllib.request.Request(url, headers={auth_header: f"{auth_prefix}{key}"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310
-                return json.loads(r.read().decode())
-        except urllib.error.HTTPError as e:
-            last = f"HTTP {e.code}"
-            if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
-                wait = 2 ** (attempt + 1)
-                print(f"    {last} — retrying in {wait}s")
-                time.sleep(wait)
-                continue
-            if e.code in (401, 403):
-                raise RuntimeError(
-                    f"{last} for {redact(url)}. Auth rejected — check "
+
+    def http_error(code: int, label: str) -> str:
+        if code in (401, 403):
+            return (f"{label} for {redact(url)}. Auth rejected — check "
                     f"NEXSCOPE_API_KEY, and check the auth scheme: this module "
                     f"assumes '{auth_header}: {auth_prefix.strip()} <key>'. If "
                     f"the API wants a bare key or a different header, pass "
-                    f"--auth-header / --auth-prefix."
-                ) from None
-            if e.code == 404:
-                raise RuntimeError(
-                    f"{last} for {redact(url)}. The endpoint path is an "
+                    f"--auth-header / --auth-prefix.")
+        if code == 404:
+            return (f"{label} for {redact(url)}. The endpoint path is an "
                     f"assumption in this module — pass the real one with "
-                    f"--endpoint (or set NEXSCOPE_ENDPOINT)."
-                ) from None
-            raise RuntimeError(f"{last} for {redact(url)}") from None
-        except urllib.error.URLError as e:
-            raise RuntimeError(
-                f"cannot reach {urllib.parse.urlparse(endpoint).netloc} "
-                f"({e.reason}). If this is the Claude Code sandbox, that host "
+                    f"--endpoint (or set NEXSCOPE_ENDPOINT).")
+        return f"{label} for {redact(url)}"
+
+    def url_error(reason: object) -> str:
+        return (f"cannot reach {urllib.parse.urlparse(endpoint).netloc} "
+                f"({reason}). If this is the Claude Code sandbox, that host "
                 f"is refused by the egress proxy with a 403 — run this where "
-                f"you have ordinary internet access."
-            ) from None
-    raise RuntimeError(f"gave up after {retries} attempts ({last})")
+                f"you have ordinary internet access.")
+
+    return get_json(url, {auth_header: f"{auth_prefix}{key}"},
+                    timeout=timeout, retries=retries,
+                    http_error=http_error, url_error=url_error)
 
 
 # ---------------------------------------------------------------- parsing
@@ -460,133 +430,6 @@ def opportunity_flag(s: dict) -> str:
     return "flat"
 
 
-# ---------------------------------------------------------------- dry run
-def _archetype_for(keyword: str) -> int:
-    """Stable archetype index for a keyword with no named fixture.
-
-    Hashed rather than random so a dry run is reproducible, and varied rather
-    than constant because the alternative — sending every unnamed keyword down
-    one archetype — makes a large dry run degenerate: 100 candidates all
-    receiving the same series produce one verdict, no ranking, and no evidence
-    that the pipeline handles scale.
-    """
-    return int(hashlib.md5(keyword.encode()).hexdigest(), 16) % 5
-
-
-def _series(kind: int, scale: int) -> list[int]:
-    """The five archetypes, parameterised by volume so the demand component
-    has a spread to normalise over."""
-    if kind == 0:                                   # steady riser
-        return [round(scale * (1.03 ** i)) for i in range(60)]
-    if kind == 1:                                   # faster riser
-        return [round(scale * (1.045 ** i)) for i in range(60)]
-    if kind == 2:                                   # flat
-        return [scale * 10 + (i % 5) * (scale // 4 or 1) for i in range(60)]
-    if kind == 3:                                   # seasonal, below last year
-        peak = scale * 6
-        return ([peak // 5, peak // 3, peak // 2, peak, peak, peak, peak, peak,
-                 peak // 2, peak // 4, peak // 6, peak // 8]
-                + [peak // 10] * 43
-                + [peak // 8, peak // 5, peak // 3, peak // 2, round(peak * 0.6)])
-    pattern = [scale, scale * 9, scale * 2, scale * 12, scale, scale * 7]
-    return ([pattern[i % len(pattern)] for i in range(52)]
-            + [scale, scale, scale * 2, scale, scale * 14, scale * 15,
-               scale * 13, scale * 16])
-
-
-def dry_run_payload(keyword: str) -> dict:
-    """Named fixtures for the keywords the tests pin, hashed archetypes for
-    everything else.
-
-    The five named series exist so the tests can assert exact numbers and so
-    every branch of opportunity_flag() is exercised: a clean riser, a flat
-    line, a seasonal category rising short-term but BELOW the same week last
-    year, and a noisy one whose apparent growth sits inside its own variance.
-
-    60 weekly points, so index 59 is "now" and index 7 is ~52 weeks earlier —
-    the pair year_over_year() compares.
-    """
-    start = date(2025, 8, 25)
-    kw = keyword.lower()
-    if "moringa" in kw:                       # steady ~3%/week riser
-        vals = [round(1000 * (1.03 ** i)) for i in range(60)]
-    elif "turmeric soap" in kw:               # faster riser, higher volume
-        vals = [round(4000 * (1.045 ** i)) for i in range(60)]
-    elif "shilajit" in kw:                    # riser, but a small prize
-        vals = [round(300 * (1.035 ** i)) for i in range(60)]
-    elif "honey" in kw:                       # flat, mild noise
-        vals = [40000 + (i % 5) * 300 for i in range(60)]
-    elif "mouth tape" in kw:
-        # Seasonal: last year's peak (~30k around index 7) dwarfs this year's
-        # (~18k at index 59), so momentum is positive but YoY is negative.
-        vals = [6000, 9000, 14000, 22000, 28000, 30000, 30000, 30000,
-                24000, 16000, 10000, 7000] + [5000] * 43 + \
-               [6000, 9000, 13000, 16000, 18000]
-    elif "sleep gummies" in kw:
-        # Noisy: oscillates hard enough that the last-4-vs-prior-4 comparison
-        # reads as growth while the series has no trend the fit can explain.
-        pattern = [1000, 9000, 1500, 12000, 800, 7000, 2000, 15000]
-        vals = [pattern[i % len(pattern)] for i in range(52)] + \
-               [1000, 800, 1200, 900, 14000, 15000, 13000, 16000]
-    else:
-        h = int(hashlib.md5(kw.encode()).hexdigest(), 16)
-        vals = _series(_archetype_for(kw), 200 + (h // 5) % 4000)
-    history = [
-        {"week_start": (start + timedelta(weeks=i)).isoformat(),
-         "search_volume": v, "rank": max(1, 100000 - v)}
-        for i, v in enumerate(vals)
-    ]
-    return {"status": "ok", "data": {"keyword": keyword, "history": history}}
-
-
-# ---------------------------------------------------------------- output
-def write_csv(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
-        w.writeheader()
-        w.writerows(rows)
-
-
-def write_markdown(path: Path, rows: list[dict], country: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cols = list(rows[0].keys())
-    md = [
-        "# Amazon keyword demand trends",
-        "",
-        f"Marketplace: **{country}** · {len(rows)} keywords · sorted by momentum.",
-        "",
-        "| " + " | ".join(cols) + " |",
-        "| " + " | ".join("---" for _ in cols) + " |",
-    ]
-    for r in rows:
-        md.append("| " + " | ".join("" if r[c] is None else str(r[c]) for c in cols) + " |")
-    md += [
-        "",
-        "## Reading the columns",
-        "",
-        "- `growth_per_period_pct` is a least-squares fit on **log** volume, so "
-        "it is a growth rate: 100→200 and 10,000→20,000 score the same.",
-        "- `momentum_pct` compares the last 4 periods to the 4 before, not "
-        "latest-vs-oldest — search volume is spiky and endpoint comparisons "
-        "swing on a single reading.",
-        "- `yoy_pct` is the seasonality control. Positive momentum with negative "
-        "YoY is a category coming off a trough, not one that is growing.",
-        "- `volatility_cv` guards the growth numbers. Above ~0.6 the trend is "
-        "within the noise and `opportunity_flag` says so.",
-        "- `pct_of_peak` shows whether the latest reading is near the series "
-        "high or recovering from a dip.",
-        "",
-        "**Schema caveat:** the API response shape this was parsed from is an "
-        "assumption (see the module docstring). If a column is empty across "
-        "every keyword, the field name is probably wrong rather than the data "
-        "missing.",
-    ]
-    path.write_text("\n".join(md) + "\n", encoding="utf-8")
-
-
 def load_keywords(args) -> list[str]:
     if args.keywords_file:
         text = Path(args.keywords_file).read_text(encoding="utf-8")
@@ -599,7 +442,7 @@ def load_keywords(args) -> list[str]:
     return kws
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Rank Amazon keywords by demand trend.")
     ap.add_argument("--keywords", default="moringa oil,honey,mouth tape,sleep gummies",
                     help="comma-separated keywords")
@@ -622,64 +465,88 @@ def main() -> int:
                     default=DEFAULT_CACHE_MAX_AGE_HOURS,
                     help="refetch cached series older than this; 0 = never expire")
     ap.add_argument("--out", default="reports")
-    args = ap.parse_args()
+    return ap
 
-    keywords = load_keywords(args)
-    country = args.country.upper()
-    start = (date.today() - timedelta(weeks=args.weeks)).isoformat()
 
+def resolve_payload(kw: str, args, country: str, start: str, key):
+    """Dry-run fixture, cache, or live fetch for one keyword.
+
+    Returns the raw payload, or None when the keyword must be skipped (the
+    reason has already been printed).
+    """
+    cp = cache_path(kw, country)
+    fresh = cache_is_fresh(cp, args.cache_max_age_hours)
+    if args.dry_run:
+        return dry_run_payload(kw)
+    if args.from_cache or fresh:
+        if not cp.exists():
+            print(f"  {kw!r}: no cache — skipped")
+            return None
+        payload = json.loads(cp.read_text())
+        if not fresh:
+            print(f"  {kw!r}: STALE CACHE {cache_age_hours(cp):.0f}h old "
+                  f"(limit {args.cache_max_age_hours:g}h), using it anyway "
+                  f"because --from-cache forbids a refetch")
+        return payload
+    try:
+        payload = fetch(kw, country, key, args.endpoint,
+                        args.auth_header, args.auth_prefix, start=start)
+    except RuntimeError as e:
+        print(f"  {kw!r}: {e}")
+        return None
+    if not args.no_cache:
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        cp.write_text(json.dumps(payload))
+    time.sleep(args.sleep)
+    return payload
+
+
+def summarise_payload(kw: str, payload, window: int) -> dict | None:
+    """Parse, summarise, flag and print one keyword's row; None on schema mismatch."""
+    try:
+        points = parse_series(payload, kw)
+    except SchemaMismatch as e:
+        print(f"  {kw!r}: SCHEMA MISMATCH — {e}")
+        return None
+    s = summarise_keyword(kw, points, window)
+    s["opportunity_flag"] = opportunity_flag(s)
+    print(f"  {kw:<20s} n={s['observations']:<4d} "
+          f"latest {s['latest_volume']:>8,}  "
+          f"growth/period {s['growth_per_period_pct']}%  "
+          f"momentum {s['momentum_pct']}%  → {s['opportunity_flag']}")
+    return s
+
+
+def announce_mode(args, keywords: list[str], country: str, start: str) -> str | None:
+    """Print the dry-run / cache-only banner and return the API key (None offline)."""
     if args.dry_run:
         print("DRY RUN — no network call is made.\n")
         print("  Assumed request shape:")
         print(f"    GET {redact(build_url(args.endpoint, keywords[0], country, start, None))}")
         print(f"    {args.auth_header}: {args.auth_prefix}<NEXSCOPE_API_KEY>\n")
-        key = None
-    elif args.from_cache:
+        return None
+    if args.from_cache:
         print(f"CACHE ONLY — reading {CACHE_DIR}/, no network call is made.\n")
-        key = None
-    else:
-        key = api_key()
+        return None
+    return api_key()
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    keywords = load_keywords(args)
+    country = args.country.upper()
+    start = (date.today() - timedelta(weeks=args.weeks)).isoformat()
+    key = announce_mode(args, keywords, country, start)
 
     rows: list[dict] = []
     for kw in keywords:
-        cp = cache_path(kw, country)
-        fresh = cache_is_fresh(cp, args.cache_max_age_hours)
-        if args.dry_run:
-            payload = dry_run_payload(kw)
-        elif args.from_cache or fresh:
-            if not cp.exists():
-                print(f"  {kw!r}: no cache — skipped")
-                continue
-            payload = json.loads(cp.read_text())
-            if not fresh:
-                print(f"  {kw!r}: STALE CACHE {cache_age_hours(cp):.0f}h old "
-                      f"(limit {args.cache_max_age_hours:g}h), using it anyway "
-                      f"because --from-cache forbids a refetch")
-        else:
-            try:
-                payload = fetch(kw, country, key, args.endpoint,
-                                args.auth_header, args.auth_prefix, start=start)
-            except RuntimeError as e:
-                print(f"  {kw!r}: {e}")
-                continue
-            if not args.no_cache:
-                cp.parent.mkdir(parents=True, exist_ok=True)
-                cp.write_text(json.dumps(payload))
-            time.sleep(args.sleep)
-
-        try:
-            points = parse_series(payload, kw)
-        except SchemaMismatch as e:
-            print(f"  {kw!r}: SCHEMA MISMATCH — {e}")
+        payload = resolve_payload(kw, args, country, start, key)
+        if payload is None:
             continue
-
-        s = summarise_keyword(kw, points, args.window)
-        s["opportunity_flag"] = opportunity_flag(s)
-        rows.append(s)
-        print(f"  {kw:<20s} n={s['observations']:<4d} "
-              f"latest {s['latest_volume']:>8,}  "
-              f"growth/period {s['growth_per_period_pct']}%  "
-              f"momentum {s['momentum_pct']}%  → {s['opportunity_flag']}")
+        s = summarise_payload(kw, payload, args.window)
+        if s is not None:
+            rows.append(s)
 
     if not rows:
         print("\nNothing parsed. If every keyword failed on reachability, this "
