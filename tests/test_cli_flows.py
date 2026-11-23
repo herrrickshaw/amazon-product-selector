@@ -447,3 +447,113 @@ def test_trends_fetch_builds_request_and_error_messages(monkeypatch):
     assert seen["http_error"](500, "HTTP 500").startswith("HTTP 500 for ")
     assert "cannot reach h.example (boom)" in seen["url_error"]("boom")
     assert tr.build_url("http://e", "k", "US", None, None) == "http://e?keyword=k&country=US"
+
+
+# =============================== boundaries found by mutation testing ===============================
+
+def test_ratio_zero_operand_is_not_applicable():
+    assert comp._ratio(0, 5) == "n/a" and comp._ratio(5, 0) == "n/a" and comp._ratio(None, 3) == "n/a"
+    assert comp._ratio(4, 2) == "2.0x" and comp._ratio(2, 4) == "2.0x"
+
+
+def test_dedupe_prefers_listing_with_units(monkeypatch):
+    seq = iter([{"data": {"products": [{"asin": "A1", "product_title": "x", "sales_volume": None,
+                                        "product_price": "$1", "product_num_ratings": 1}]}},
+                {"data": {"products": [{"asin": "A1", "product_title": "x",
+                                        "sales_volume": "100+ bought in past month",
+                                        "product_price": "$1", "product_num_ratings": 1}]}},
+                {"data": {"products": [{"asin": "A1", "product_title": "x", "sales_volume": None,
+                                        "product_price": "$1", "product_num_ratings": 1}]}}])
+    monkeypatch.setattr(comp, "dry_run_payload", lambda g, c: next(seq))
+    rows, _ = comp.collect_group("g", ["a", "b", "c"], "US", 1, None, 0, True, False, False, 24)
+    assert len(rows) == 1 and rows[0]["units_past_month"] == 100          # later richer row wins, then is kept
+
+
+def test_parse_price_rejects_two_decimal_points_but_not_one():
+    assert comp.parse_price("1.2.3") is None and comp.parse_price("$1,299.00") == 1299.0
+
+
+def test_default_pages_sleep_and_windows(monkeypatch, sandbox):
+    assert tr.build_parser().parse_args([]).weeks == 52 and tr.build_parser().parse_args([]).window == 4
+    seen = []
+    monkeypatch.setattr(time, "sleep", seen.append)
+    monkeypatch.setenv("OPENWEB_NINJA_API_KEY", "T")
+    pages = []
+    monkeypatch.setattr(comp, "fetch", lambda q, c, p, k: pages.append(p) or comp.dry_run_payload(q, c))
+    assert run(comp, monkeypatch, "--group", "g=moringa oil") == 0
+    assert pages == [1, 2] and seen == [1.0, 1.0]                         # defaults: 2 pages, 1 s between calls
+
+
+def test_opportunity_flag_momentum_thresholds_are_strict():
+    base = {"growth_per_period_pct": 1.0, "volatility_cv": 0.1, "trend_fit_r2": 0.9, "yoy_pct": 5.0}
+    assert tr.opportunity_flag(dict(base, momentum_pct=10.0)) == "flat"
+    assert tr.opportunity_flag(dict(base, momentum_pct=10.1)) == "RISING"
+    down = {"growth_per_period_pct": -1.0, "volatility_cv": 0.1, "trend_fit_r2": 0.9, "yoy_pct": -5.0}
+    assert tr.opportunity_flag(dict(down, momentum_pct=-10.0)) == "flat"
+    assert tr.opportunity_flag(dict(down, momentum_pct=-9.5)) == "flat"
+    assert tr.opportunity_flag(dict(down, momentum_pct=-10.1)) == "declining"
+
+
+def _gate(**kw):
+    cand = {"opportunity_flag": "RISING", "observations": 10, "latest_volume": 100, "review_moat": 50,
+            "median_price": 25.0, "listings_sampled": 5}
+    cand.update(kw)
+    return sl.gate(cand, allowed_flags=("RISING",), min_volume=100, min_observations=10,
+                   max_review_moat=50, min_median_price=25.0)
+
+
+def test_gate_thresholds_are_inclusive():
+    assert _gate() == []                                   # every value exactly at its threshold passes
+    assert len(_gate(observations=9)) == 1 and "9 observations" in _gate(observations=9)[0]
+    assert len(_gate(latest_volume=99)) == 1
+    assert len(_gate(review_moat=51)) == 1 and "above 50" in _gate(review_moat=51)[0]
+    assert len(_gate(median_price=24.99)) == 1
+
+
+def test_gate_no_competition_data_for_none_or_zero_listings():
+    assert _gate(listings_sampled=0) == ["no competition data"]
+    assert _gate(listings_sampled=None) == ["no competition data"]
+    assert _gate(listings_sampled=1) == []
+
+
+def test_profiles_run_in_order_b2c_then_b2b(sandbox, monkeypatch, capsys):
+    run(sl, monkeypatch, "--dry-run", "--out", "o")
+    out = capsys.readouterr().out
+    assert out.index(sl.PROFILES["b2c"]["label"]) < out.index(sl.PROFILES["b2b"]["label"])
+
+
+def test_in_market_volume_scale_applies_to_gates():
+    from _markets import resolve_gates
+    g = resolve_gates(sl.PROFILES["b2c"], sl.MARKETS["IN"])
+    assert g["min_volume"] == max(1.0, round(sl.PROFILES["b2c"]["gates"]["min_volume"] * 0.2))
+    assert resolve_gates(sl.PROFILES["b2b"], sl.MARKETS["US"])["min_median_price"] == 25.0
+
+
+def test_get_json_backoff_doubles_from_two_seconds(monkeypatch):
+    import urllib.error
+
+    import _http
+    sleeps = []
+    calls = []
+
+    class R:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"ok": 1}'
+
+    def fake_urlopen(req, timeout):
+        calls.append(1)
+        if len(calls) < 3:
+            raise urllib.error.HTTPError(req.full_url, 429, "x", {}, None)
+        return R()
+
+    monkeypatch.setattr(_http.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(_http.time, "sleep", sleeps.append)
+    assert _http.get_json("http://t.test/", {}, timeout=1, retries=3, http_error=lambda c, lbl: lbl,
+                          url_error=str) == {"ok": 1}
+    assert sleeps == [2, 4]
