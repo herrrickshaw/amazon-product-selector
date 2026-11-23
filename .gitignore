@@ -15,3 +15,5 @@ reports/
 # Never commit these.
 .env
 *.env
+coverage.xml
+.coverage

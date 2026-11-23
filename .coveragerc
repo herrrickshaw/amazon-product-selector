@@ -1,0 +1,10 @@
+[run]
+source = amazon_selector
+omit =
+    tests/*
+    */conftest.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
